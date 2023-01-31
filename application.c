@@ -3,19 +3,25 @@
 #include "canTinyTimber.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include  <stdbool.h>
 
 typedef struct {
     Object super;
     int count;
+    char history_count;
+    char buff[15];
     char c;
+    int history[3];
+    bool loop;
 } App;
 
-App app = { initObject(), 0, 'X' };
+App app = { initObject(), 0, 0, {}, '\0', {}, false};
 
+void num_history(App*, int);
 void reader(App*, int);
 void receiver(App*, int);
 
-Serial sci0 = initSerial(SCI_PORT0, &app, reader);
+Serial sci0 = initSerial(SCI_PORT0, &app, num_history);
 
 Can can0 = initCan(CAN_PORT0, &app, receiver);
 
@@ -27,9 +33,68 @@ void receiver(App *self, int unused) {
 }
 
 void reader(App *self, int c) {
+        switch ((char)c) {
+            case '0'...'9':
+                case '-':
+                    self->buff[self->count++] = (char)c;
+                    SCI_WRITECHAR(&sci0, c);
+                    break;
+            case 'e':
+                self->buff[self->count++] = '\0';
+                int num = atoi(self->buff);
+                char tmp_ptr[15];
+                snprintf(tmp_ptr, 15, "Value typed: %d", num);
+                self->buff[0] = '\0';
+                self->count = 0;
+                SCI_WRITE(&sci0, "\nRcv: \'");
+                SCI_WRITE(&sci0, tmp_ptr);
+                SCI_WRITE(&sci0, "\'\n");
+                
+                break;
+        }
+}
+
+void num_history(App *self, int c){
     SCI_WRITE(&sci0, "Rcv: \'");
     SCI_WRITECHAR(&sci0, c);
     SCI_WRITE(&sci0, "\'\n");
+    
+    switch((char) c){
+        case '0' ... '9':
+            case '-':
+                self->buff[self->count++] = (char)c;
+                //SCI_WRITECHAR(&sci0, c);
+                break;
+        case 'e':
+            int num = atoi(self->buff); //convert buff content to int
+            self->history[self->history_count++] = num; //insert typed int in history array
+            self->history_count = self->history_count % 3; //history pointer loop around
+            if (self->history_count==0) self->loop = true;
+            
+            char tmp[64]; 
+            self->buff[self->count++] = '\0'; //null-terminate
+
+            //Find median
+            int median;
+            if (self->loop) {
+                // Calculate median
+            } else {
+                if (self->history_count == 1) median = self->history[0];
+                if (self->history_count == 2) median = (self->history[0]+self->history[1])/2;
+            }
+            
+            snprintf(tmp, 64, "Value typed: %d, sum: %d, median: %d\n", num, (self->history[0]+self->history[1]+self->history[2]), median);
+            SCI_WRITE(&sci0, tmp);
+            memset(self->buff, 0, sizeof self->buff);
+            self->count = 0;
+            break;
+        case 'F': 
+            memset(self->history, 0, sizeof self->history);
+            self->history_count = 0;
+            self->loop = false;
+            SCI_WRITE(&sci0, "3-History has been erased\n");
+            break;
+    }
 }
 
 void startApp(App *self, int arg) {
