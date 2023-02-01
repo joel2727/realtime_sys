@@ -51,6 +51,8 @@ void num_history(App*, int);
 void reader(App*, int);
 void receiver(App*, int);
 
+int calculate_median(int[3]);
+
 Serial sci0 = initSerial(SCI_PORT0, &app, num_history);
 
 Can can0 = initCan(CAN_PORT0, &app, receiver);
