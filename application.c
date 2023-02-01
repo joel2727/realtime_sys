@@ -15,6 +15,36 @@ typedef struct {
     bool loop;
 } App;
 
+const int melody[32] = {0, 2, 4, 0, 0, 2, 4, 0, 4, 5, 7, 4, 5, 7, 7, 9, 7, 5, 4, 0, 7, 9, 7, 5, 4, 0, 0, -5, 0, 0, -5, 0};
+
+const int period[25] = {
+2024,
+1911,
+1803,
+1702,
+1607,
+1516,
+1431,
+1351,
+1275,
+1203,
+1136,
+1072,
+1012,
+955,
+901,
+851,
+803,
+758,
+715,
+675,
+637,
+601,
+568,
+536,
+506,
+};
+
 App app = { initObject(), 0, 0, {}, '\0', {}, false};
 
 void num_history(App*, int);
@@ -49,7 +79,6 @@ void reader(App *self, int c) {
                 SCI_WRITE(&sci0, "\nRcv: \'");
                 SCI_WRITE(&sci0, tmp_ptr);
                 SCI_WRITE(&sci0, "\'\n");
-                
                 break;
         }
 }
@@ -63,7 +92,6 @@ void num_history(App *self, int c){
         case '0' ... '9':
             case '-':
                 self->buff[self->count++] = (char)c;
-                //SCI_WRITECHAR(&sci0, c);
                 break;
         case 'e':
             int num = atoi(self->buff); //convert buff content to int
@@ -77,7 +105,8 @@ void num_history(App *self, int c){
             //Find median
             int median;
             if (self->loop) {
-                // Calculate median
+                int index = calculate_median(self->history); // Calculate median
+                median = self->history[index];
             } else {
                 if (self->history_count == 1) median = self->history[0];
                 if (self->history_count == 2) median = (self->history[0]+self->history[1])/2;
@@ -95,6 +124,38 @@ void num_history(App *self, int c){
             SCI_WRITE(&sci0, "3-History has been erased\n");
             break;
     }
+}
+
+int calculate_median(int arr[3]) {
+    if (arr[0] < arr[1]) {
+        if (arr[1] < arr[2]) {
+            return 1;
+        } else if (arr[0] < arr[2]) {
+            return 2;
+        } else {
+            return 0;
+        }
+    } else {
+        if (arr[0] < arr[2]) {
+            return 0;
+        } else if (arr[1] < arr[2]) {
+            return 2;
+        } else {
+            return 1;
+        }
+    }
+}
+
+// TODO SCI_WRITE
+void print_melody_transpose(int key) {
+    if (key>5 || key<-5) {
+        printf("Unvalid key transpose\n");
+    }
+    for (int i = 0; i < 32; i++) {
+        printf("%d ", melody[i]+key);
+    }
+    printf("\n");
+    return;
 }
 
 void startApp(App *self, int arg) {
