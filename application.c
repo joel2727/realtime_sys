@@ -149,12 +149,12 @@ int calculate_median(int arr[3]) {
 // TODO SCI_WRITE
 void print_melody_transpose(int key) {
     if (key>5 || key<-5) {
-        printf("Unvalid key transpose\n");
+        //printf("Unvalid key transpose\n");
     }
     for (int i = 0; i < 32; i++) {
-        printf("%d ", melody[i]+key);
+        //printf("%d ", melody[i]+key);
     }
-    printf("\n");
+    //printf("\n");
     return;
 }
 
