@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include  <stdbool.h>
+#include "constants.h"
 
 typedef struct {
     Object super;
@@ -15,35 +16,13 @@ typedef struct {
     bool loop;
 } App;
 
-const int melody[32] = {0, 2, 4, 0, 0, 2, 4, 0, 4, 5, 7, 4, 5, 7, 7, 9, 7, 5, 4, 0, 7, 9, 7, 5, 4, 0, 0, -5, 0, 0, -5, 0};
+typedef struct {
+    Object super;
+    int period;
+    int length;
+    int volume;
 
-const int period[25] = {
-2024,
-1911,
-1803,
-1702,
-1607,
-1516,
-1431,
-1351,
-1275,
-1203,
-1136,
-1072,
-1012,
-955,
-901,
-851,
-803,
-758,
-715,
-675,
-637,
-601,
-568,
-536,
-506,
-};
+} Tone;
 
 App app = { initObject(), 0, 0, {}, '\0', {}, false};
 
@@ -51,18 +30,31 @@ void num_history(App*, int);
 void reader(App*, int);
 void receiver(App*, int);
 
+void tone_control(Tone*, int);
+void high(Tone*, int);
+void low(Tone*, int);
+
+int * volatile const addr_DAC = (int*)0x4000741C;
+
+Tone tone = { initObject(), 1000, 1, 5};
+
+void high(Tone* self, int not_used) {
+    *addr_DAC = self->volume;
+    AFTER(USEC(self->period), self, low, 0);
+}
+
+void low(Tone* self, int not_used) {
+    *addr_DAC = 0;
+    AFTER(USEC(self->period), self, high, 0);
+}
+
+// Util functions
+
+// Returns index of median in list of 3 int
 int calculate_median(int[3]);
 
-Serial sci0 = initSerial(SCI_PORT0, &app, num_history);
-
-Can can0 = initCan(CAN_PORT0, &app, receiver);
-
-void receiver(App *self, int unused) {
-    CANMsg msg;
-    CAN_RECEIVE(&can0, &msg);
-    SCI_WRITE(&sci0, "Can msg received: ");
-    SCI_WRITE(&sci0, msg.buff);
-}
+// Communication
+Serial sci0 = initSerial(SCI_PORT0, &app, tone_control);
 
 void reader(App *self, int c) {
         switch ((char)c) {
@@ -84,6 +76,28 @@ void reader(App *self, int c) {
                 break;
         }
 }
+
+void tone_control(Tone *self, int c){
+    char tmp;
+    switch ((char)c) {
+            case 'o':
+                if (self->volume > 0) {
+                    self->volume--;
+                }
+                
+                sprintf(tmp, "%c", (char)self->volume);
+                SCI_WRITECHAR(&sci0, tmp);
+                break;
+            case 'p':
+                if (self->volume < 15) {
+                    self->volume++;
+                }
+                
+                sprintf(tmp, "%c", (char)self->volume);
+                SCI_WRITECHAR(&sci0, tmp);
+                break;
+        }
+} 
 
 void num_history(App *self, int c){
     SCI_WRITE(&sci0, "Rcv: \'");
@@ -116,6 +130,7 @@ void num_history(App *self, int c){
             
             snprintf(tmp, 64, "Value typed: %d, sum: %d, median: %d\n", num, (self->history[0]+self->history[1]+self->history[2]), median);
             SCI_WRITE(&sci0, tmp);
+
             memset(self->buff, 0, sizeof self->buff);
             self->count = 0;
             break;
@@ -148,40 +163,31 @@ int calculate_median(int arr[3]) {
     }
 }
 
-// TODO SCI_WRITE
 void print_melody_transpose(int key) {
     if (key>5 || key<-5) {
-        //printf("Unvalid key transpose\n");
+        SCI_WRITE(&sci0, "Unvalid key transpose\n");
+        return;
     }
+    char *note;
     for (int i = 0; i < 32; i++) {
-        //printf("%d ", melody[i]+key);
+        snprintf(note, 1, "%d ", melody[i]+key);
+        SCI_WRITECHAR(&sci0, *note);
     }
-    //printf("\n");
+    SCI_WRITE(&sci0, "\n");
     return;
 }
 
 void startApp(App *self, int arg) {
-    CANMsg msg;
 
-    CAN_INIT(&can0);
     SCI_INIT(&sci0);
     SCI_WRITE(&sci0, "Hello, hello...\n");
 
-    msg.msgId = 1;
-    msg.nodeId = 1;
-    msg.length = 6;
-    msg.buff[0] = 'H';
-    msg.buff[1] = 'e';
-    msg.buff[2] = 'l';
-    msg.buff[3] = 'l';
-    msg.buff[4] = 'o';
-    msg.buff[5] = 0;
-    CAN_SEND(&can0, &msg);
+    high(&tone, 0);
 }
 
 int main() {
     INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
-	INSTALL(&can0, can_interrupt, CAN_IRQ0);
+
     TINYTIMBER(&app, startApp, 0);
     return 0;
 }
