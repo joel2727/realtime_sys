@@ -34,8 +34,6 @@ typedef struct {
     int length;
     int volume;
     bool mute;
-    //int load_period;
-    //int background_loop_range;
 
 } Tone;
 
@@ -49,6 +47,9 @@ App app = { initObject(), 0, 0, {}, '\0', {}, false};
 Tone tone = { initObject(), 931, 1, 3, false};
 Work work = { initObject(), 1300, 1000};
 
+//Pointer to DAC
+int * volatile const addr_DAC = (int*)0x4000741C;
+
 void num_history(App*, int);
 void reader(App*, int);
 void receiver(App*, int);
@@ -59,13 +60,10 @@ void low(Tone*, int);
 
 //Setters/getters
 int get_period(Work* self, int unused);
+int get_loop_range(Work* self, int unused);
 void set_period(Work* self, int period);
 void set_loop_range(Work* self, int range);
-int get_loop_range(Work* self, int unused);
-
 void set_work(Work*, int);
-
-int * volatile const addr_DAC = (int*)0x4000741C;
 
 int get_period(Work* self, int unused){
     return self->load_period;
@@ -95,9 +93,7 @@ void low(Tone* self, int not_used) {
 }
 
 void set_work(Work* self, int not_used) {
-    for (int i = 0; i < self->background_loop_range; i++) {
-
-    }
+    for (int i = 0; i < self->background_loop_range; i++);
     AFTER(USEC(self->load_period), self, set_work, 0);
 }
 
@@ -123,20 +119,14 @@ void reader(App *self, int c) {
                 print_melody_transpose(self, num);
                 memset(self->buff, 0, sizeof self->buff);//self->buff[0] = '\0';
                 self->count = 0;
-                /*char tmp_ptr[15];
-                snprintf(tmp_ptr, 15, "Value typed: %d", num);
-                self->buff[0] = '\0';
-                self->count = 0;
-                SCI_WRITE(&sci0, "\nRcv: \'");
-                SCI_WRITE(&sci0, tmp_ptr);
-                SCI_WRITE(&sci0, "\'\n");*/
                 break;
         }
 }
 
 void tone_control(Tone *self, int c){
     char volume[3];
-    char work[33];
+    char work_loop_value[33];
+    int background_work_value;
     switch ((char)c) {
             case 'o':
                 if (self->volume > 0) {
@@ -147,37 +137,35 @@ void tone_control(Tone *self, int c){
                 
                 SCI_WRITE(&sci0, volume);
                 break;
-            case 'p':
+            case 'p': //Increase volume
                 if (self->volume < 25) {
                     self->volume++;
-                }
-                
+                }           
                 
                 sprintf(&volume, "%d", self->volume);
                 
                 SCI_WRITE(&sci0, volume);
                 break;
-            case 'm':
+            case 'm': //Lower volume
                 self->mute = !self->mute;
                 
                 SCI_WRITE(&sci0, "Mute-toggle");
                 break;
             case 'q':
-
-                int background_loop_range = SYNC(&work, get_loop_range, 0);
+                background_work_value = SYNC(&work, get_loop_range, 0);
                 
-                if (background_loop_range > 0)
-                    SYNC(&work, set_loop_range, background_loop_range-500);
-                snprintf(work, 33, "%d", background_loop_range-500);
+                if (background_work_value > 0)
+                    SYNC(&work, set_loop_range, background_work_value-500);
+                snprintf(work_loop_value, 33, "%d", background_work_value-500);
                 SCI_WRITE(&sci0, "Lower workload\n");
-                SCI_WRITE(&sci0, work);
+                SCI_WRITE(&sci0, work_loop_value);
                 SCI_WRITE(&sci0, "\n");
                 break;
             case 'w':
-                SYNC(&work, set_loop_range, background_loop_range+500);
-                snprintf(work, 33, "%d", background_loop_range+500);
+                SYNC(&work, set_loop_range, background_work_value+500);
+                snprintf(work_loop_value, 33, "%d", background_work_value+500);
                 SCI_WRITE(&sci0, "Lower workload\n");
-                SCI_WRITE(&sci0, work);
+                SCI_WRITE(&sci0, work_loop_value);
                 SCI_WRITE(&sci0, "\n");
                 break;
         }
@@ -281,8 +269,8 @@ void startApp(App *self, int arg) {
 
     //print_melody_transpose(&app, -1);
 
-    //high(&tone, 0);
-    //set_work(&tone, 0);
+    ASYNC(&tone, high, 0);
+    ASYNC(&work, set_work, 0);
 }
 
 int main() {
