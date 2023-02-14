@@ -34,10 +34,12 @@ typedef struct {
 } App;
 typedef struct {
     Object super;
+
     int period;
-    int length;
     int volume;
+    bool high;
     bool mute;
+
     bool deadlineEnabled;
 } Tone;
 
@@ -50,7 +52,7 @@ typedef struct {
 
 
 App app = { initObject(), '\0'};
-Tone tone = { initObject(), 931, 1, 3, false, false};
+Tone tone = { initObject(), 931, 1, false, false, false};
 Work work = { initObject(), 1000, 1000, false};
 
 //Pointer to DAC
@@ -62,8 +64,7 @@ void reader(App*, int);
 void receiver(App*, int);
 void controller(App*, int);
 
-void high(Tone*, int);
-void low(Tone*, int);
+void playTone(Tone*, int);
 int lowerVolume(Tone*, int);
 int raiseVolume(Tone*, int);
 void mute(Tone*, int);
@@ -74,23 +75,21 @@ void setWork(Work*, int);
 
 // Function Definitions
 
-void high(Tone* self, int not_used) {
-    if (!self->mute)
-        *addr_DAC = self->volume;
-    
-    if (self->deadlineEnabled)
-        SEND(USEC(self->period), TONE_DEADLINE, self, low, 0);
-    else
-        AFTER(USEC(self->period), self, low, 0);
-}
+void playTone(Tone* self, int not_used) {
 
-void low(Tone* self, int not_used) {
+    self->high = !self->high;
+
+    if (self->high && !self->mute) {
+        *addr_DAC = self->volume;
+        return;
+    }
+
     *addr_DAC = 0;
-    if (self->deadlineEnabled) 
-        SEND(USEC(self->period), TONE_DEADLINE, self, high, 0);
+
+    if (self->deadlineEnabled)
+        SEND(USEC(self->period), TONE_DEADLINE, self, playTone, 0);
     else
-        AFTER(USEC(self->period), self, high, 0);
-    
+        AFTER(USEC(self->period), self, playTone, 0);
 }
 
 int lowerVolume(Tone* self, int not_used) {
@@ -191,7 +190,7 @@ void startApp(App *self, int arg) {
     SCI_INIT(&sci0);
     SCI_WRITE(&sci0, "Hello, hello...\n");
 
-    ASYNC(&tone, high, 0);
+    ASYNC(&tone, playTone, 0);
     ASYNC(&work, setWork, 0);
 }
 
