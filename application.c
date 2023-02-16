@@ -60,8 +60,10 @@ App app = { initObject(), ' '};
 Tone tone = { initObject(), 500, 1, false, false, false};
 Work work = { initObject(), 1000, 1000, false};
 
-//Pointer to DAC
+//Pointer declarations
 int * volatile const addr_DAC = (int*)0x4000741C;
+int * volatile const SYSTICK_CTRL = (int*)0xE000E010;
+int * volatile const SYSTICK_RELOAD = (int *)0xE000E014;
 
 
 // Function Declarations
@@ -78,7 +80,7 @@ void toggleToneDeadline(Tone*, int);
 void toggleWorkDeadline(Work*, int);
 void setWork(Work*, int);
 
-double average(double*);
+int average(int*);
 
 // Function Definitions
 
@@ -211,41 +213,46 @@ void startApp(App *self, int arg) {
 void runTest(App *self, int arg) {
     SCI_INIT(&sci0);
 
-    volatile uint32_t start;
+    long int diff;
+    int max = 0;
+    int time_arr[500];
+    char results[48];
+    /*volatile uint32_t start;
     volatile uint32_t end;
     double time_arr[500];
     uint32_t max = 0;
 
     char results[48];
 
-    //Timer timer = initTimer();
+    //Timer timer = initTimer();*/
 
+    *SYSTICK_CTRL = 0;
 
     for (int i = 0; i < 500; i++) {
-        start = SysTick->VAL;
+        *SYSTICK_RELOAD = 100000;
+        *SYSTICK_CTRL = 1;
         setWork(&work, 0);
-        end = SysTick->VAL;
-
-        time_arr[i] = (double) (end - start) / CLOCKS_PER_SEC;
-
-        if (time_arr[i] > max)
-            max = time_arr[i];
+        *SYSTICK_CTRL = 0;
+        diff = 100000 - *SYSTICK_RELOAD;
+        time_arr[i] = diff;
+        if (diff > max)
+            max = diff;
     }
 
-    double avg = average(time_arr);
+    int avg = average(time_arr);
 
-    snprintf(results, 48, "Results - Max: %ld, Avg: %ld\n", start, end);
+    snprintf(results, 48, "Results - Max: %d, Avg: %d\n", max, avg);
     SCI_WRITE(&sci0, results);
 
 }
 
-double average(double *arr){
-    double sum = 0;
-    size_t size = sizeof(arr) / sizeof(arr[0]);
-    for(int i = 0; i < size; i++){
+int average(int *arr){
+    int sum = 0;
+    size_t arr_size = sizeof(arr) / sizeof(arr[0]);
+    for(int i = 0; i < arr_size; i++){
         sum += arr[i];
     }
-    return (double)sum/size;
+    return sum/arr_size;
 }
 
 int main() {
