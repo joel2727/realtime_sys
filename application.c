@@ -12,6 +12,8 @@ Workload control:
 Deadline:
 'd' - deadline toggle
 
+// Pitch drop occurs at loop_range = 10500
+
 */
 
 
@@ -22,10 +24,14 @@ Deadline:
 #include <stdio.h>
 #include  <stdbool.h>
 #include "constants.h"
+#include <time.h>
+#include "stm32f4xx.h"
 
 #define TONE_DEADLINE 100
 #define WORK_DEADLINE 1300
 #define MAX_VOLUME 45
+
+#define BENCHMARK 1 //Uncomment for benchmarking
 
 
 typedef struct {
@@ -50,9 +56,8 @@ typedef struct {
     bool deadlineEnabled;
 } Work;
 
-
-App app = { initObject(), '\0'};
-Tone tone = { initObject(), 931, 1, false, false, false};
+App app = { initObject(), ' '};
+Tone tone = { initObject(), 500, 1, false, false, false};
 Work work = { initObject(), 1000, 1000, false};
 
 //Pointer to DAC
@@ -73,18 +78,21 @@ void toggleToneDeadline(Tone*, int);
 void toggleWorkDeadline(Work*, int);
 void setWork(Work*, int);
 
+double average(double*);
+
 // Function Definitions
+
+// Communication 
+Serial sci0 = initSerial(SCI_PORT0, &app, controller);
 
 void playTone(Tone* self, int not_used) {
 
     self->high = !self->high;
 
-    if (self->high && !self->mute) {
+    if (self->high && !self->mute) 
         *addr_DAC = self->volume;
-        return;
-    }
-
-    *addr_DAC = 0;
+    else
+        *addr_DAC = 0;
 
     if (self->deadlineEnabled)
         SEND(USEC(self->period), TONE_DEADLINE, self, playTone, 0);
@@ -108,15 +116,23 @@ void mute(Tone* self, int not_used) {
     self->mute = !self->mute;
 }
 
+void setPeriod(Tone* self, int period) {
+    self->period = period;
+}
+
 void setWork(Work* self, int not_used) {
     for (int i = 0; i < self->background_loop_range; i++);
+    
+    #ifndef BENCHMARK
+    SCI_WRITE(&sci0, "Fault here!\n");
     if (self->deadlineEnabled)
         SEND(USEC(self->load_period), WORK_DEADLINE, self, setWork, 0);
     else  
         AFTER(USEC(self->load_period), self, setWork, 0);
+    #endif
 }
 
-int increaseWorkload(Work* self, int not_used) {
+int lowerWorkload(Work* self, int not_used) {
     if (self->background_loop_range > 0)
     self->background_loop_range -= 500;
 
@@ -131,20 +147,17 @@ void toggleToneDeadline(Tone* self, int not_used) {
     self->deadlineEnabled = !self->deadlineEnabled;
 }
 
-int lowerWorkload(Work* self, int not_used) {
+int increaseWorkload(Work* self, int not_used) {
     self->background_loop_range += 500;
 
     return self->background_loop_range;
 }
 
-// Communication
-Serial sci0 = initSerial(SCI_PORT0, &app, controller);
-
 void controller(App *self, int c){
     int currentVolume;
-    char volume[20];
-    char work_loop_value[44];
-    int background_loop_range;
+    char volume[24];
+    char work_loop_value[18];
+    int background_loop_value;
 
     switch ((char)c) {
             case 'o': //Lower volume
@@ -164,26 +177,27 @@ void controller(App *self, int c){
                 SCI_WRITE(&sci0, "Mute-toggle");
                 break;
             case 'q': //Lower workload
-                background_loop_range = SYNC(&work, lowerWorkload, 0);
+                background_loop_value = SYNC(&work, lowerWorkload, 0);
                 
-                snprintf(work_loop_value, 33, "Workload: %d\n", background_loop_range);
+                snprintf(work_loop_value, 18, "Workload: %d\n", background_loop_value);
                 SCI_WRITE(&sci0, work_loop_value);
                 break;
             case 'w': //Increase workload
-                background_loop_range = SYNC(&work, increaseWorkload, 0);
+                background_loop_value = SYNC(&work, increaseWorkload, 0);
                 
-                snprintf(work_loop_value, 33, "Workload: %d\n", background_loop_range);
+                snprintf(work_loop_value, 18, "Workload: %d\n", background_loop_value);
                 SCI_WRITE(&sci0, work_loop_value);
                 break;
             case 'd':
                 
-                SYNC(&work, toggleWorkDeadline, 0);
-                SYNC(&tone, toggleToneDeadline, 0);
+                ASYNC(&work, toggleWorkDeadline, 0);
+                ASYNC(&tone, toggleToneDeadline, 0);
                 
                 SCI_WRITE(&sci0, "Toggle deadline!\n");
                 break;
         }
 } 
+
 
 void startApp(App *self, int arg) {
 
@@ -194,9 +208,49 @@ void startApp(App *self, int arg) {
     ASYNC(&work, setWork, 0);
 }
 
+void runTest(App *self, int arg) {
+    SCI_INIT(&sci0);
+
+    volatile uint32_t start;
+    volatile uint32_t end;
+    double time_arr[500];
+    uint32_t max = 0;
+
+    char results[48];
+
+    //Timer timer = initTimer();
+
+
+    for (int i = 0; i < 500; i++) {
+        start = SysTick->VAL;
+        setWork(&work, 0);
+        end = SysTick->VAL;
+
+        time_arr[i] = (double) (end - start) / CLOCKS_PER_SEC;
+
+        if (time_arr[i] > max)
+            max = time_arr[i];
+    }
+
+    double avg = average(time_arr);
+
+    snprintf(results, 48, "Results - Max: %ld, Avg: %ld\n", start, end);
+    SCI_WRITE(&sci0, results);
+
+}
+
+double average(double *arr){
+    double sum = 0;
+    size_t size = sizeof(arr) / sizeof(arr[0]);
+    for(int i = 0; i < size; i++){
+        sum += arr[i];
+    }
+    return (double)sum/size;
+}
+
 int main() {
     INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
 
-    TINYTIMBER(&tone, startApp, 0);
+    TINYTIMBER(&app, runTest, 0);
     return 0;
 }
