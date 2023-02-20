@@ -1,5 +1,7 @@
 /* USER GUIDE
 
+Uncomment BENCHMARK constant for benchmark testing
+
 Volume control:
 'o' - lower volume
 'p' - raise volume
@@ -12,7 +14,16 @@ Workload control:
 Deadline:
 'd' - deadline toggle
 
-Pitch drop occurs at loop_range = 10500
+Pitch drop occurs at loop_range = 14000
+
+WCET for setWork (loop range = 14000)
+Results - Max: 1340 us, Avg: 1330 us
+
+WCET for setWork (loop range = 1000)
+Results - Max: 100 us, Avg: 100 us
+
+WCET for playTone
+Results - Max: 0.230 us, Avg: 0.230 us
 
 */
 
@@ -24,14 +35,12 @@ Pitch drop occurs at loop_range = 10500
 #include <stdio.h>
 #include  <stdbool.h>
 #include "constants.h"
-#include <time.h>
-#include "stm32f4xx.h"
 
 #define TONE_DEADLINE 100
 #define WORK_DEADLINE 1300
 #define MAX_VOLUME 45
 
-#define BENCHMARK 1 //Uncomment for benchmarking
+//#define BENCHMARK 1 //Uncomment for benchmarking
 
 
 typedef struct {
@@ -58,14 +67,10 @@ typedef struct {
 
 App app = { initObject(), ' '};
 Tone tone = { initObject(), 500, 1, false, false, false};
-Work work = { initObject(), 1000, 1000, false};
+Work work = { initObject(), 1000, 1300, false};
 
 //Pointer declarations
 volatile unsigned int * addr_dac = (volatile unsigned int * )0x4000741C;
-volatile unsigned int * systick_ctrl = (volatile unsigned int * )0xE000E010;
-volatile unsigned int * systick_reload = (volatile unsigned int * )0xE000E014;
-volatile unsigned int * systick_load = (volatile unsigned int * )0xE000E018;
-
 
 // Function Declarations
 void reader(App*, int);
@@ -81,7 +86,7 @@ void toggleToneDeadline(Tone*, int);
 void toggleWorkDeadline(Work*, int);
 void setWork(Work*, int);
 
-int average(int*);
+long average(long*);
 
 // Function Definitions
 
@@ -89,7 +94,6 @@ int average(int*);
 Serial sci0 = initSerial(SCI_PORT0, &app, controller);
 
 void playTone(Tone* self, int not_used) {
-
     self->high = !self->high;
 
     if (self->high && !self->mute) 
@@ -97,10 +101,12 @@ void playTone(Tone* self, int not_used) {
     else
         *addr_dac = 0;
 
+    #ifndef BENCHMARK
     if (self->deadlineEnabled)
         SEND(USEC(self->period), TONE_DEADLINE, self, playTone, 0);
     else
         AFTER(USEC(self->period), self, playTone, 0);
+    #endif
 }
 
 int lowerVolume(Tone* self, int not_used) {
@@ -213,51 +219,34 @@ void startApp(App *self, int arg) {
 volatile void runTest(App *self, int arg) {
     SCI_INIT(&sci0);
 
-    long int diff1;
-    long int diff2;
-    int max = 0;
-    int time_arr[500];
+    long diff;
+    long time_arr[500];
     char results[48];
-    /*volatile uint32_t start;
-    volatile uint32_t end;
-    double time_arr[500];
-    uint32_t max = 0;
+    long max = 0;
+    Time before;
+    Time after;
 
-    char results[48];
-
-    //Timer timer = initTimer();*/
-
-    *addr_dac = 1;
-
-    /* SystemCoreClock = 168000000 */
     for (int i = 0; i < 500; i++) {
-        *systick_reload = 168000000;
 
-        *systick_ctrl = 5;
-        setWork(&work, 0);
-        *systick_ctrl = 0;
-        diff1 = *systick_load;
+        before = CURRENT_OFFSET();
+        playTone(&tone, 0);
+        after = CURRENT_OFFSET();
+        diff = USEC_OF(after - before);
 
-        setWork(&work, 0);
-        diff2 = *systick_load;
-
-        time_arr[i] = diff1;
-        if (diff1 > max)
-            max = diff1;
+        time_arr[i] = diff;
+        if (diff > max)
+            max = diff;
     }
-    
-    *addr_dac = 0;
 
+    long avg = average(time_arr);
 
-    int avg = average(time_arr);
-
-    snprintf(results, 48, "Results - Max: %d, Avg: %d\n", diff1, diff2);
+    snprintf(results, 48, "Results - Max: %ld, Avg: %ld\n", max, avg);
     SCI_WRITE(&sci0, results);
 
 }
 
-int average(int *arr){
-    int sum = 0;
+long average(long *arr){
+    long sum = 0;
     size_t arr_size = sizeof(arr) / sizeof(arr[0]);
     for(int i = 0; i < arr_size; i++){
         sum += arr[i];
@@ -268,6 +257,6 @@ int average(int *arr){
 int main() {
     INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
 
-    TINYTIMBER(&app, runTest, 0);
+    TINYTIMBER(&app, startApp, 0);
     return 0;
 }

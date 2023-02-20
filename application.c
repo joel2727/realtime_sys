@@ -5,6 +5,10 @@ Volume control:
 'p' - raise volume
 'm' - toggle mute
 
+Other controls (<setting> + <value> + <'e'>):
+'b' - set tempo
+'v' - set key
+
 Workload control:
 'q' - decrease workload
 'w' - increase workload
@@ -25,6 +29,7 @@ Pitch drop occurs at loop_range = 10500
 #include  <stdbool.h>
 #include "constants.h"
 #include <time.h>
+#include <string.h>
 #include "stm32f4xx.h"
 
 #define TONE_DEADLINE 100
@@ -39,6 +44,12 @@ typedef struct {
     int currentMelodyIndex;
     int tempo;
     int key;
+    char buff[15];
+    int buff_index;
+    bool isPlaying;
+    bool stop;
+
+    char set_check; //0 = default, 1 = set tempo, 2 = set key
 } MusicPlayer;
 typedef struct {
     Object super;
@@ -51,7 +62,7 @@ typedef struct {
     
 } ToneGenerator;
 
-MusicPlayer musicPlayer = { initObject(), ' ', 0, 120, 0};
+MusicPlayer musicPlayer = { initObject(), ' ', 0, 120, 0, {}, 0, false, 0, false};
 ToneGenerator toneGenerator = { initObject(), 500, 1, false, false, false};
 
 //Pointer declarations
@@ -79,6 +90,7 @@ void setPeriod(ToneGenerator*, int);
 Serial sci0 = initSerial(SCI_PORT0, &musicPlayer, controller);
 
 void playMelody(MusicPlayer* self, int unused){
+    if (self->stop) return;
 
     Time beatLength = MSEC(1000 * 60 / self->tempo);
     Time toneLength = beatLength * toneLengthFactor[self->currentMelodyIndex];
@@ -140,6 +152,13 @@ void controller(MusicPlayer *self, int c){
     char volume[24];
 
     switch ((char)c) {
+            case '0'...'9':
+                case '-':
+                    if(self->set_check != 0){
+                        SCI_WRITECHAR(&sci0, (char)c);
+                        self->buff[self->buff_index++] = (char)c;
+                    }
+                    break;
             case 'o': //Lower volume
                 currentVolume = SYNC(&toneGenerator, lowerVolume, 0);
 
@@ -153,8 +172,55 @@ void controller(MusicPlayer *self, int c){
                 SCI_WRITE(&sci0, volume);
                 break;
             case 'm': //Mute
-                mute(&toneGenerator, 0);
-                SCI_WRITE(&sci0, "Mute-toggle");
+                ASYNC(&toneGenerator, mute, 0);
+                SCI_WRITE(&sci0, "Mute-toggle\n");
+                break;
+            case 'a': //Play
+                if (!self->isPlaying){
+                    self->currentMelodyIndex = 0;
+                    self->stop = false;
+                    ASYNC(&musicPlayer, playMelody, 0);
+                }
+                self->isPlaying = true;
+                SCI_WRITE(&sci0, "Play\n");
+                break;
+            case 's': //Stop
+                self->isPlaying = false;
+                self->stop = true;
+                SYNC(&toneGenerator, stop, 0);
+                SCI_WRITE(&sci0, "Stop\n");
+                break;
+            case 'b': //Set tempo
+                self->set_check = 1;
+                SCI_WRITE(&sci0, "New tempo: ");
+                break;
+            case 'v': //Set key
+                self->set_check = 2;
+                SCI_WRITE(&sci0, "New key: ");
+                break;
+            case 'e': //Parse input
+                if(self->set_check == 1){ // Set tempo
+                    self->buff[self->buff_index++] = '\0';
+                    int newTempo = atoi(self->buff);
+                    if (newTempo >= 60 && newTempo <= 240){
+                        self->tempo = newTempo;
+                    } else {
+                        SCI_WRITE(&sci0, "\nTempo must be between 60 and 240!");
+                    }
+                }
+                else if(self->set_check == 2){ // Set key
+                    self->buff[self->buff_index++] = '\0';
+                    int newKey = atoi(self->buff);
+                    if (newKey <= 5 && newKey >= -5){
+                        self->key = newKey;
+                    } else {
+                        SCI_WRITE(&sci0, "\nKey must be between -5 and 5");
+                    }
+                }
+                memset(self->buff, 0, sizeof self->buff);
+                self->buff_index = 0;
+                self->set_check = 0;
+                SCI_WRITECHAR(&sci0, '\n');
                 break;
         }
 } 
@@ -169,7 +235,5 @@ int main() {
 void startApp(MusicPlayer *self, int arg) {
 
     SCI_INIT(&sci0);
-    SCI_WRITE(&sci0, "Hello, hello...\n");
-
-    ASYNC(self, playMelody, 0);
+    SCI_WRITE(&sci0, "Brother John:)\n");
 }
