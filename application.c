@@ -16,7 +16,9 @@ Workload control:
 Deadline:
 'd' - deadline toggle
 
-Pitch drop occurs at loop_range = 10500
+Start/Stop:
+'a' - start
+'s' - stop
 
 */
 
@@ -30,7 +32,6 @@ Pitch drop occurs at loop_range = 10500
 #include "constants.h"
 #include <time.h>
 #include <string.h>
-#include "stm32f4xx.h"
 
 #define TONE_DEADLINE 100
 #define MAX_VOLUME 45
@@ -235,5 +236,5 @@ int main() {
 void startApp(MusicPlayer *self, int arg) {
 
     SCI_INIT(&sci0);
-    SCI_WRITE(&sci0, "Brother John:)\n");
+    SCI_WRITE(&sci0, "Application loaded\n");
 }
