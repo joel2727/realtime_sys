@@ -45,6 +45,7 @@ OBJECTS= $(DEBUGDIR)dispatch.o \
          $(DEBUGDIR)TinyTimber.o \
          $(DEBUGDIR)canTinyTimber.o \
          $(DEBUGDIR)sciTinyTimber.o \
+         $(DEBUGDIR)sioTinyTimber.o \
          $(DEBUGDIR)stm32f4xx_can.o \
          $(DEBUGDIR)stm32f4xx_dac.o \
          $(DEBUGDIR)stm32f4xx_exti.o \
@@ -100,9 +101,11 @@ $(DEBUGDIR)canTinyTimber.o: canTinyTimber.c canTinyTimber.h
 	$(CC) -c $< -o $@ $(CCFLAGS)
 $(DEBUGDIR)sciTinyTimber.o: sciTinyTimber.c sciTinyTimber.h
 	$(CC) -c $< -o $@ $(CCFLAGS)
+$(DEBUGDIR)sioTinyTimber.o: sioTinyTimber.c sioTinyTimber.h
+	$(CC) -c $< -o $@ $(CCFLAGS)
 
 # User-defined targets
-$(DEBUGDIR)application.o: application.c TinyTimber.h sciTinyTimber.h canTinyTimber.h
+$(DEBUGDIR)application.o: application.c TinyTimber.h sciTinyTimber.h canTinyTimber.h sioTinyTimber.h
 	$(CC) -c $< -o $@ $(CCFLAGS)
 
 ###
