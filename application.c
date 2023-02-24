@@ -77,7 +77,7 @@ void controller(MusicPlayer*, int);
 void startApp(MusicPlayer*, int);
 
 void start(ToneGenerator*, int);
-void stop(ToneGenerator*, int);
+void toggleStop(ToneGenerator*, int);
 void enablePlay(ToneGenerator*, int);
 
 int lowerVolume(ToneGenerator*, int);
@@ -104,7 +104,7 @@ void playMelody(MusicPlayer* self, int unused){
     self->currentMelodyIndex = (self->currentMelodyIndex + 1) % 32;
 
     BEFORE(MSEC(1), &toneGenerator, start, 0);
-    SEND(toneLength - MSEC(50), MSEC(1), &toneGenerator, stop, 0);
+    SEND(toneLength - MSEC(50), MSEC(1), &toneGenerator, toggleStop, 0);
     SEND(toneLength, MSEC(1), self, playMelody, 0);
 }
 
@@ -120,7 +120,7 @@ void start(ToneGenerator* self, int not_used) {
         SEND(USEC(self->period), USEC(TONE_DEADLINE), self, start, 0);
 }
 
-void stop(ToneGenerator* self, int unused){
+void toggleStop(ToneGenerator* self, int unused){
     self->stop = true;
 }
 
@@ -188,7 +188,7 @@ void controller(MusicPlayer *self, int c){
             case 's': //Stop
                 self->isPlaying = false;
                 self->stop = true;
-                SYNC(&toneGenerator, stop, 0);
+                SYNC(&toneGenerator, toggleStop, 0);
                 SCI_WRITE(&sci0, "Stop\n");
                 break;
             case 'b': //Set tempo
