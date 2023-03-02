@@ -9,16 +9,13 @@ Other controls (<setting> + <value> + <'e'>):
 'b' - set tempo
 'v' - set key
 
-Workload control:
-'q' - decrease workload
-'w' - increase workload
-
-Deadline:
-'d' - deadline toggle
-
 Start/Stop:
 'a' - start
 's' - stop
+
+'t' - Toggle conductor/musician
+
+IMPORTANT: Only use tap tempo in conductor mode (Default mode)
 
 */
 
@@ -26,20 +23,17 @@ Start/Stop:
 #include "TinyTimber.h"
 #include "sciTinyTimber.h"
 #include "canTinyTimber.h"
+#include "sioTinyTimber.h"
+#include "constants.h"
 #include <stdlib.h>
 #include <stdio.h>
-#include  <stdbool.h>
-#include "constants.h"
+#include <stdbool.h>
 #include <time.h>
 #include <string.h>
 
 #define TONE_DEADLINE 100
 #define MAX_VOLUME 45
-
-#define BENCHMARK 1 //Uncomment for benchmarking
-
-enum msgTypes {InitPlay=1, LowerVol=2, IncreaseVol=3, ToggleMute=4, Play=5, Stop=6, Tempo=7, Key=8};
-
+#define BLINK_TIME 100
 
 typedef struct {
     Object super;
@@ -47,14 +41,17 @@ typedef struct {
     int currentMelodyIndex;
     int tempo;
     int key;
-    char buff[15];
+    char buff[8];
+    Time tempoBurst[3];
     int buff_index;
+    int tempo_index;
     bool isPlaying;
-    bool stop;
-    int volume;
+    bool stateOfButton;
+    Timer timer;
+    Timer longTimer;
 
     char set_check; //0 = default, 1 = set tempo, 2 = set key
-    char mode; //0 = default, 1 = conductor, 2 = musician
+    bool isReady;
 } MusicPlayer;
 typedef struct {
     Object super;
@@ -67,7 +64,7 @@ typedef struct {
     
 } ToneGenerator;
 
-MusicPlayer musicPlayer = { initObject(), ' ', 0, 120, 0, {}, 0, false, false,1, 0, 0};
+MusicPlayer musicPlayer = { initObject(), ' ', 0, 120, 0, {}, {}, 0, -1, false, false, initTimer(), initTimer(), 0, true};
 ToneGenerator toneGenerator = { initObject(), 500, 1, false, false, false};
 
 //Pointer declarations
@@ -77,11 +74,16 @@ volatile unsigned int * addr_dac = (volatile unsigned int * )0x4000741C;
 // Function Declarations
 void reader(MusicPlayer*, int);
 void receiver(MusicPlayer*, int);
-void controller(MusicPlayer*, int);
+void loopReceiver(MusicPlayer*, int);
+void conductor(MusicPlayer*, int);
+void loopConductor(MusicPlayer*, int);
+void buttonOld(MusicPlayer*, int);
+void button(MusicPlayer*, int);
+void checkLongPress(MusicPlayer*, int);
 void startApp(MusicPlayer*, int);
 
 void start(ToneGenerator*, int);
-void toggleStop(ToneGenerator*, int);
+void stop(ToneGenerator*, int);
 void enablePlay(ToneGenerator*, int);
 
 int lowerVolume(ToneGenerator*, int);
@@ -89,21 +91,25 @@ int raiseVolume(ToneGenerator*, int);
 void mute(ToneGenerator*, int);
 void setPeriod(ToneGenerator*, int);
 
-void sendCanMsg(MusicPlayer*, int);
-
-// Function Definitions
+int averageTempo(Time*);
+int validTempoBurst(Time*);
 
 // Communication 
-Serial sci0 = initSerial(SCI_PORT0, &musicPlayer, controller);
+Serial sci0c = initSerial(SCI_PORT0, &musicPlayer, conductor); // conductor callback
+Serial sci0m = initSerial(SCI_PORT0, &musicPlayer, loopConductor); // musician callback
+Can can0m = initCan(CAN_PORT0, &musicPlayer, receiver); // conductor callback
+Can can0c = initCan(CAN_PORT0, &musicPlayer, loopReceiver); // musician callback
 
-// CAN Communication
-Can can0 = initCan(CAN_PORT0, &musicPlayer, receiver);
+SysIO sio0 = initSysIO(SIO_PORT0, &musicPlayer, button); // button callback
 
+// Function Definitions
+void playMelody(MusicPlayer* self, int unused) {
+    if (!self->isPlaying) { // Stop melody
+        self->isReady = true; // Signal playMelody will no longer execute
+        return;
+    }
 
-
-void playMelody(MusicPlayer* self, int unused){
-    if (self->stop) return;
-
+    // Configure tone generator
     Time beatLength = MSEC(1000 * 60 / self->tempo);
     Time toneLength = beatLength * toneLengthFactor[self->currentMelodyIndex];
     int currentToneIndex = melody[self->currentMelodyIndex];
@@ -111,12 +117,22 @@ void playMelody(MusicPlayer* self, int unused){
     SYNC(&toneGenerator, setPeriod, currentPeriod);
     SYNC(&toneGenerator, enablePlay, 0);
     
+    BEFORE(MSEC(1), &toneGenerator, start, 0); // Start tone
+    SEND(toneLength - MSEC(50), MSEC(1), &toneGenerator, stop, 0); // End tone
+    SEND(toneLength, MSEC(1), self, playMelody, 0); // Call to play next note in melody
 
+    // Blinking
+    switch (blinkCountFactor[self->currentMelodyIndex]) {
+    case 2: // half note
+       SEND(beatLength, MSEC(1), &sio0, sio_write, 0);
+       SEND(beatLength + MSEC(BLINK_TIME), MSEC(1), &sio0, sio_write, 1);
+    case 1: // on beat
+       SEND(0, MSEC(1), &sio0, sio_write, 0);
+       SEND(MSEC(BLINK_TIME), MSEC(1), &sio0, sio_write, 1);
+    }
+
+    // Increment melody index
     self->currentMelodyIndex = (self->currentMelodyIndex + 1) % 32;
-
-    BEFORE(MSEC(1), &toneGenerator, start, 0);
-    SEND(toneLength - MSEC(50), MSEC(1), &toneGenerator, toggleStop, 0);
-    SEND(toneLength, MSEC(1), self, playMelody, 0);
 }
 
 void start(ToneGenerator* self, int not_used) {
@@ -131,7 +147,7 @@ void start(ToneGenerator* self, int not_used) {
         SEND(USEC(self->period), USEC(TONE_DEADLINE), self, start, 0);
 }
 
-void toggleStop(ToneGenerator* self, int unused){
+void stop(ToneGenerator* self, int unused){
     self->stop = true;
 }
 
@@ -159,260 +175,474 @@ void setPeriod(ToneGenerator* self, int period) {
     self->period = period;
 }
 
-void controller(MusicPlayer *self, int c){
+void conductor(MusicPlayer *self, int c){
+    CANMsg msg;
+    msg.nodeId = 1;
+    msg.length = 0;
+
     int currentVolume;
     char volume[24];
 
     switch ((char)c) {
-            case '0'...'9':
-                case '-':
-                    if(self->mode == 2) return;
-                    if(self->set_check != 0){
-                        SCI_WRITECHAR(&sci0, (char)c);
-                        self->buff[self->buff_index++] = (char)c;
-                    }
-                    break;
-            case 'o': //Lower volume
-                if(self->mode == 2) return;
-                else if (self->mode == 1)
-                    ASYNC(&musicPlayer, sendCanMsg, LowerVol);
-                else {
-                    currentVolume = SYNC(&toneGenerator, lowerVolume, 0);
-                    sprintf(volume, "Current volume: %d\n", currentVolume);
-                    SCI_WRITE(&sci0, volume);
+        case '0'...'9':
+            case '-':
+                if(self->set_check != 0){
+                    SCI_WRITECHAR(&sci0c, (char)c);
+                    self->buff[self->buff_index++] = (char)c;
                 }
-                break;
-            case 'p': //Increase volume
-                if(self->mode == 2) return;
-                else if (self->mode == 1)
-                    ASYNC(&musicPlayer, sendCanMsg, IncreaseVol);
-                else {
-                    currentVolume = SYNC(&toneGenerator, raiseVolume, 0);          
-                    sprintf(volume, "Current volume: %d\n", currentVolume);
-                    SCI_WRITE(&sci0, volume);
-                }
-                break;
-            case 'm': //Mute
-                if(self->mode == 2) return;
-                else if (self->mode == 1)
-                    ASYNC(&musicPlayer, sendCanMsg, ToggleMute);
-                else{
-                    ASYNC(&toneGenerator, mute, 0);
-                    SCI_WRITE(&sci0, "Mute-toggle\n");
-                }
-                break;
-            case 'a': //Play
-                if(self->mode == 2) return;
-                if (self->mode == 0 && !self->isPlaying){
-                    self->currentMelodyIndex = 0;
-                    self->stop = false;
-                    ASYNC(&musicPlayer, playMelody, 0);
-                    self->isPlaying = true;
-                    SCI_WRITE(&sci0, "Play\n");
-                }
-                else if (self->mode == 1)
-                    ASYNC(&musicPlayer, sendCanMsg, Play);
-                break;
-            case 's': //Stop
-                if(self->mode == 2) return; 
-                else if(self->mode == 1)
-                    ASYNC(&musicPlayer, sendCanMsg, Stop);
-                else{
-                    self->isPlaying = false;
-                    self->stop = true;
-                    SYNC(&toneGenerator, enablePlay, 0);
-                    SCI_WRITE(&sci0, "Stop\n");
-                }
-                break;
-            case 'b': //Set tempo
-                if(self->mode == 2) return;
-                self->set_check = 1;
-                SCI_WRITE(&sci0, "New tempo: ");
-                break;
-            case 'v': //Set key
-                if(self->mode == 2) return;
-                self->set_check = 2;
-                SCI_WRITE(&sci0, "New key: ");
-                break;
-            case 'e': //Parse input
-                if(self->mode == 2) return;
-                if(self->set_check == 1){ // Set tempo
-                    self->buff[self->buff_index++] = '\0';
-                    int newTempo = atoi(self->buff);
-                    if (newTempo >= 60 && newTempo <= 240){
-                        self->tempo = newTempo;
-                        if(self->mode == 1)
-                            ASYNC(&musicPlayer, sendCanMsg, Tempo);
-                    } else {
-                        SCI_WRITE(&sci0, "\nTempo must be between 60 and 240!");
-                    }
-                }
-                else if(self->set_check == 2){ // Set key
-                    self->buff[self->buff_index++] = '\0';
-                    int newKey = atoi(self->buff);
-                    if (newKey <= 5 && newKey >= -5){
-                        self->key = newKey;
-                        if(self->mode == 1)
-                            ASYNC(&musicPlayer, sendCanMsg, Key);
-
-                    } else {
-                        SCI_WRITE(&sci0, "\nKey must be between -5 and 5");
-                    }
-                }
-                memset(self->buff, 0, sizeof self->buff);
-                self->buff_index = 0;
-                self->set_check = 0;
-                SCI_WRITECHAR(&sci0, '\n');
-                break;
-            case 'g': // Toggle conductor
-                self->mode = self->mode == 0 ? 1 : 0;
-                if(self->mode == 0){
-                    SCI_WRITE(&sci0, "Toggled normal mode\n");
-                }
-                else{
-                    SCI_WRITE(&sci0, "Toggled conductor mode\n");
-                    self->isPlaying = false;
-                    self->stop = true;
-                    SYNC(&toneGenerator, enablePlay, 0);
-                    ASYNC(&musicPlayer, sendCanMsg, InitPlay);
-                }
-                
-                break;
-            case 'h': // Toggle musician
-                self->mode = self->mode == 0 ? 2 : 0;
-                if(self->mode == 0)
-                    SCI_WRITE(&sci0, "Toggled normal mode\n");
-                else{
-                    self->isPlaying = false;
-                    self->stop = true;
-                    SYNC(&toneGenerator, enablePlay, 0);
-                    SCI_WRITE(&sci0, "Toggled musician mode\n");
-                }
-                break;
-                
-        }
-}
-
-//typedef enum {Init, LowerVol, IncreaseVol, ToggleMute, Play, Stop, Tempo, Key} msgTypes;
-
-void sendCanMsg(MusicPlayer *self, int value){
-    CANMsg sendMsg;
-
-    switch((enum msgTypes)value){
-        case InitPlay:
-            sendMsg.msgId = 1;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 0;
-            break;
-        case LowerVol:
-            sendMsg.msgId = 2;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 0;
-            break;
-        case IncreaseVol:
-            sendMsg.msgId = 3;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 0;
-            break;
-        case ToggleMute:
-            sendMsg.msgId = 4;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 0;
-            break;
-        case Play:
-            sendMsg.msgId = 5;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 0;
-            break;
-        case Stop:
-            sendMsg.msgId = 6;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 0;
-            break;
-        case Tempo:
-            sendMsg.msgId = 7;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 1;
-            sendMsg.buff[0] = (char)self->tempo;
-            break;
-        case Key:
-            sendMsg.msgId = 8;
-            sendMsg.nodeId = 1;
-            sendMsg.length = 1;
-            sendMsg.buff[0] = (char)self->key;
-            break;
-    }
-
-    CAN_SEND(&can0, &sendMsg);
-}
-
-void receiver(MusicPlayer *self, int unused) {
-    //if (self->mode != 2) return;
-    CANMsg msg;
-    CAN_RECEIVE(&can0, &msg);
-    int currentVolume;
-    char volume[24];
-    enum msgTypes d = (enum msgTypes)msg.msgId;
-    switch(d){
-        case InitPlay:
-            if(!self->isPlaying){
-                self->currentMelodyIndex = 0;
-                self->stop = false;
-                ASYNC(&musicPlayer, playMelody, 0);
-            }
-            self->isPlaying = true;
-            break;
-        case LowerVol:
+                return;
+        case 'o': //Lower volume
+            msg.msgId = 'o';
             currentVolume = SYNC(&toneGenerator, lowerVolume, 0);
             sprintf(volume, "Current volume: %d\n", currentVolume);
-            SCI_WRITE(&sci0, volume);
+            SCI_WRITE(&sci0c, volume);
             break;
-        case IncreaseVol:
+        case 'p': //Increase volume
+            msg.msgId = 'p';
+            currentVolume = SYNC(&toneGenerator, raiseVolume, 0);         
+            sprintf(volume, "Current volume: %d\n", currentVolume);
+            SCI_WRITE(&sci0c, volume);
+            break;
+        case 'm': //Mute
+            msg.msgId = 'm';
+            ASYNC(&toneGenerator, mute, 0);
+            SCI_WRITE(&sci0c, "Mute-toggle\n");
+            break;
+        case 'a': //Play
+            if (self->isPlaying) return;
+            if (!self->isReady) return;
+            self->isPlaying = true;
+            msg.msgId = 'a';
+            self->currentMelodyIndex = 0;
+            ASYNC(&musicPlayer, playMelody, 0);
+            SCI_WRITE(&sci0c, "Play\n");
+            break;
+        case 's': //Stop
+            if (!self->isPlaying) return;
+            self->isPlaying = false;
+            self->isReady = false;
+            msg.msgId = 's';
+            SYNC(&toneGenerator, stop, 0);
+            SCI_WRITE(&sci0c, "Stop\n");
+            break;
+        case 't': //Toggle conductor/musician
+            INSTALL(&sci0m, sci_interrupt, SCI_IRQ0);
+            SCI_INIT(&sci0m);
+            INSTALL(&can0m, can_interrupt, CAN_IRQ0);
+            CAN_INIT(&can0m);
+            SCI_WRITE(&sci0m, "Now entering mucisian mode\n");
+            return;
+        case 'b': //Set tempo
+            self->set_check = 1;
+            SCI_WRITE(&sci0c, "New tempo: ");
+            return;
+        case 'v': //Set key
+            self->set_check = 2;
+            SCI_WRITE(&sci0c, "New key: ");
+            return;
+        case 'e': //Parse input
+            bool clearReturn = false;
+            switch(self->set_check) { // What mode are we in?
+            case 0: 
+                clearReturn = true;
+                break;
+            case 1: // Set tempo
+                self->buff[self->buff_index++] = '\0';
+                int newTempo = atoi(self->buff);
+                if (newTempo < 30 && newTempo > 240){
+                    SCI_WRITE(&sci0c, "\nTempo must be between 60 and 240!");
+                    clearReturn = true;
+                } else {
+                    self->tempo = newTempo;
+                    msg.msgId = 'b';
+                }
+                break;
+            case 2: // Set key
+                self->buff[self->buff_index++] = '\0';
+                int newKey = atoi(self->buff);
+                if (newKey > 5 && newKey < -5){
+                    SCI_WRITE(&sci0c, "\nKey must be between -5 and 5");
+                    clearReturn = true;
+                } else {
+                    self->key = newKey;
+                    msg.msgId = 'v';
+                }
+                break;
+            }
+
+            // copy content to buffer
+            if (self->set_check != 0 && !clearReturn) {
+                msg.length = self->buff_index;
+                strcpy((char*)msg.buff, self->buff);
+            }
+            
+            // Clear buffer
+            memset(self->buff, 0, sizeof self->buff);
+            self->buff_index = 0;
+            self->set_check = 0;
+            SCI_WRITECHAR(&sci0c, '\n');
+            if (clearReturn) return; // Do not send CAN message
+            break;
+
+        default:
+            return;
+    }
+    CAN_SEND(&can0c, &msg);
+}
+
+void loopConductor(MusicPlayer *self, int c){
+    CANMsg msg;
+    msg.nodeId = 1;
+    msg.length = 0;
+
+    switch ((char)c) {
+        case '0'...'9':
+            case '-':
+                if(self->set_check != 0){
+                    SCI_WRITECHAR(&sci0m, (char)c);
+                    self->buff[self->buff_index++] = (char)c;
+                }
+                return;
+
+        case 'o': //Lower volume
+            msg.msgId = 'o';
+            break;
+
+        case 'p': //Increase volume
+            msg.msgId = 'p';          
+            break;
+
+        case 'm': //Mute
+            msg.msgId = 'm';
+            break;
+
+        case 'a': //Play
+            if (self->isPlaying) return;
+            if (!self->isReady) return;
+            msg.msgId = 'a';
+            break;
+
+        case 's': //Stop
+            if (!self->isPlaying) return;
+            msg.msgId = 's';
+            break;
+
+        case 't': //Toggle conductor/musician    
+            INSTALL(&sci0c, sci_interrupt, SCI_IRQ0);
+            SCI_INIT(&sci0c);
+            INSTALL(&can0c, can_interrupt, CAN_IRQ0);
+            CAN_INIT(&can0c);
+            SCI_WRITE(&sci0c, "Now entering conductor mode\n");
+            return;
+
+        case 'b': //Set tempo
+            self->set_check = 1;
+            SCI_WRITE(&sci0m, "New tempo: ");
+            return;
+
+        case 'v': //Set key
+            self->set_check = 2;
+            SCI_WRITE(&sci0m, "New key: ");
+            return;
+
+        case 'e': //Parse numerical input
+            bool clearReturn = false;
+            switch (self->set_check) { // Check mode
+            case 0: // No mode, clear buffer and return
+                clearReturn = true;
+            case 1: // Set tempo
+                self->buff[self->buff_index++] = '\0';
+                int newTempo = atoi(self->buff);
+                if (newTempo < 30 && newTempo > 300){
+                    SCI_WRITE(&sci0m, "\nTempo must be between 30 and 300!\n");
+                    clearReturn = true; // Invalid, clear buffer and return
+                } else {
+                    msg.msgId = 'b';
+                }
+                break;
+            case 2: // Set key
+                self->buff[self->buff_index++] = '\0';
+                int newKey = atoi(self->buff);
+                if (newKey > 5 && newKey < -5){
+                    SCI_WRITE(&sci0m, "\nKey must be between -5 and 5\n");
+                    clearReturn = true;  // Invalid, clear buffer and return
+                } else {
+                    msg.msgId = 'v';
+                }
+                break;
+            }
+
+            // Copy buffer to message
+            if (self->set_check != 0 && !clearReturn) {
+                msg.length = self->buff_index;
+                strcpy((char*)msg.buff, self->buff);
+            }
+
+            // Clear buffer
+            memset(self->buff, 0, sizeof self->buff);
+            self->buff_index = 0;
+            self->set_check = 0;
+            SCI_WRITECHAR(&sci0m, '\n');
+            if (clearReturn) return;
+            break;
+        
+        default:
+            return;
+    }
+
+    CAN_SEND(&can0m, &msg);
+}
+
+void receiver(MusicPlayer *self, int unused){
+    CANMsg msg;
+    CAN_RECEIVE(&can0m, &msg);
+    SCI_WRITE(&sci0m, "Can msg received: ");
+    SCI_WRITE(&sci0m, msg.buff);
+
+    int currentVolume;
+    char volume[24];
+
+    switch ((int)msg.msgId) {
+
+        case 'o': //Lower volume
+            currentVolume = SYNC(&toneGenerator, lowerVolume, 0);
+            sprintf(volume, "Current volume: %d\n", currentVolume);
+            SCI_WRITE(&sci0m, volume);
+            break;
+
+        case 'p': //Increase volume
             currentVolume = SYNC(&toneGenerator, raiseVolume, 0);          
             sprintf(volume, "Current volume: %d\n", currentVolume);
-            SCI_WRITE(&sci0, volume);
+            SCI_WRITE(&sci0m, volume);
             break;
-        case ToggleMute:
+
+        case 'm': //Mute
             ASYNC(&toneGenerator, mute, 0);
-            SCI_WRITE(&sci0, "Mute-toggle\n");
+            SCI_WRITE(&sci0m, "Mute-toggle\n");
             break;
-        case Play:
-            if(!self->isPlaying){
-                self->currentMelodyIndex = 0;
-                self->stop = false;
-                ASYNC(&musicPlayer, playMelody, 0);
-            }
+
+        case 'a': //Play
+            if (self->isPlaying) return;
+            if (!self->isReady) return;
             self->isPlaying = true;
-            SCI_WRITE(&sci0, "Play\n");
+            self->currentMelodyIndex = 0;
+            ASYNC(&musicPlayer, playMelody, 0);
+            SCI_WRITE(&sci0m, "Play\n");
             break;
-        case Stop:
+
+        case 's': //Stop
+            if (!self->isPlaying) return;
             self->isPlaying = false;
-            self->stop = true;
-            SYNC(&toneGenerator, enablePlay, 0);
-            SCI_WRITE(&sci0, "Stop\n");
+            self->isReady = false;
+            SYNC(&toneGenerator, stop, 0);
+            SCI_WRITE(&sci0m, "Stop\n");
             break;
-        case Tempo:
-            self->tempo = (int)msg.buff[0];
-            SCI_WRITE(&sci0, "Tempo set\n");
+
+        case 'b': //Set tempo
+            int newTempo = atoi((char*)msg.buff);
+            self->tempo = newTempo;
             break;
-        case Key:
-            self->key = (int)msg.buff[0];
-            SCI_WRITE(&sci0, "Key set\n");
+
+        case 'v': //Set key
+            int newKey = atoi((char*)msg.buff);
+            self->key = newKey;
             break;
+
+    }
+} 
+
+void loopReceiver(MusicPlayer *self, int unused){
+    CANMsg msg;
+    CAN_RECEIVE(&can0c, &msg);
+    SCI_WRITE(&sci0c, "Can msg received of type '");
+    
+    switch ((char)msg.msgId)
+    {
+    case 'o':
+    SCI_WRITE(&sci0c, "Increase volume");
+        break;
+    case 'p':
+    SCI_WRITE(&sci0c, "Decrease volume");
+        break;
+    case 'm':
+    SCI_WRITE(&sci0c, "Mute toggle");
+        break;
+    case 'a':
+    SCI_WRITE(&sci0c, "Play");
+        break;
+    case 's':
+    SCI_WRITE(&sci0c, "Stop");
+        break;
+    case 'b':
+    SCI_WRITE(&sci0c, "Tempo change");
+        break;
+    case 'v':
+    SCI_WRITE(&sci0c, "Key change");
+        break;
+    default:
+    SCI_WRITE(&sci0c, "Unknown");
+        break;
+    }
+    
+    SCI_WRITE(&sci0c, "' containing payload: '");
+    SCI_WRITE(&sci0c, msg.buff);
+    SCI_WRITE(&sci0c, "'\n");
+
+} 
+
+void buttonOld(MusicPlayer *self, int unused) {
+    char timePrint[45];
+    
+    self->stateOfButton = SIO_READ(&sio0);
+    SIO_TRIG(&sio0, !self->stateOfButton);
+
+    //Pressed
+    if(!self->stateOfButton) {
+        T_RESET(&self->longTimer);
+        SEND(SEC(1), MSEC(1), self, checkLongPress, 0);
+        return;
+    }
+    
+    //Released
+    Time diff = T_SAMPLE(&self->longTimer);
+
+    if (diff < MSEC(100)) return; // Filter contact bounces
+
+    if (diff <= MSEC(1000)) {
+        // Long press
+        // Express time in s
+        snprintf(timePrint, 40, "Button long-pressed for %d s\n", SEC_OF(diff));
+    } else {
+        // Momentary press
+        // Express time in ms
+        snprintf(timePrint, 40, "Button long-pressed for %dms\n", MSEC_OF(diff));
+    }
+    SCI_WRITE(&sci0c, timePrint);
+}
+
+void button(MusicPlayer *self, int unused) {
+
+    self->stateOfButton = SIO_READ(&sio0);  // Remember button state
+    SIO_TRIG(&sio0, !self->stateOfButton);  // Flip trigger
+
+    if (!self->stateOfButton) { // Button pressed
+        T_RESET(&self->longTimer); // Reset timer for button pressed time
+        return;
+    }
+
+    // Released
+    Time downTime = T_SAMPLE(&self->longTimer); 
+
+    if (downTime >= SEC(2)) {
+        // Prepare and send CAN message
+        CANMsg msg;
+        msg.nodeId = 1;
+        msg.msgId = 'b';
+        char tempoBuff[4];
+        snprintf(tempoBuff, 4, "%d", 120);
+        msg.length = self->buff_index;
+        strcpy((char*)msg.buff, self->buff);
+        CAN_SEND(&can0c, &msg);
+
+        self->tempo = 120;
+        memset(self->tempoBurst, 0, sizeof self->tempoBurst);
+        self->tempo_index = -1;
+        SCI_WRITE(&sci0c, "Tempo reset to 120 BPM");
+        return;
+    }
+
+    if (self->tempo_index == -1) { // First press in tempo burst series
+        T_RESET(&self->timer); // Reset timer until next release
+        self->tempo_index++; // Increment tempo burst index
+        return;
+    }
+
+    // In the middle of a tempo burst
+    Time diff = T_SAMPLE(&self->timer); // Time since last release
+    T_RESET(&self->timer); // Reset timer
+
+    if (diff < MSEC(100)) return; // Filter contact bounces
+
+    self->tempoBurst[self->tempo_index] = diff; // Insert time
+
+    if (self->tempo_index < 2) {
+        self->tempo_index++; // Increment until next release
+        return;
+    }
+
+    if (!validTempoBurst(self->tempoBurst)) {
+        SCI_WRITE(&sci0c, "Need steadier tempo!");
+        memset(self->tempoBurst, 0, sizeof self->tempoBurst); // Clear tempo burst array
+        self->tempo_index = -1; // Reset tempo index
+    }
+
+    // Proper tempoBurst, find and set tempo
+    int newTempo = averageTempo(self->tempoBurst); // Find tempo
+    
+    if (newTempo < 30 || newTempo > 300) {
+        SCI_WRITE(&sci0c, "Tempo must be between 30 and 300 BPM");
+        memset(self->tempoBurst, 0, sizeof self->tempoBurst); // Clear tempo burst array
+        self->tempo_index = -1; // Reset tempo index
+        return;
+    }
+
+    // Prepare and send CAN message
+    CANMsg msg;
+    msg.nodeId = 1;
+    msg.msgId = 'b';
+    char tempoBuff[4];
+    snprintf(tempoBuff, 4, "%d", newTempo);
+    msg.length = self->buff_index;
+    strcpy((char*)msg.buff, self->buff);
+    CAN_SEND(&can0c, &msg);
+
+    self->tempo = newTempo; // Set new tempo
+    char tempoPrint[29];
+    snprintf(tempoPrint, 40, "New tempo: %d BPM\n", newTempo);
+    SCI_WRITE(&sci0c, tempoPrint);
+    memset(self->tempoBurst, 0, sizeof self->tempoBurst); // Clear tempo burst array
+    self->tempo_index = -1; // Reset tempo index
+    return;
+}
+
+int averageTempo(Time *tempoBurst) {
+    Time averageBeatLength = (tempoBurst[0]
+        +tempoBurst[1]
+        +tempoBurst[2])/3;
+    return (int) 60000 / MSEC_OF(averageBeatLength);
+} 
+
+int validTempoBurst(Time *tempoBurst) {
+    for (int i = 0; i < 3; i++) {
+    // We have at least 1 item in list
+    Time diff = tempoBurst[i];
+    Time variance = tempoBurst[(i + 1) % 3] - diff; // Difference between last duration
+    if (variance > MSEC(100) && variance < -MSEC(100)) { // 100 ms limit
+        return 0;
+    }}
+    return 1;
+}
+
+void checkLongPress(MusicPlayer *self, int unused) {
+    Time diff = T_SAMPLE(&self->longTimer);
+    if (diff >= SEC(1) && !self->stateOfButton) {
+        SCI_WRITE(&sci0c, "Now entering LONG-PRESS-MODE\n");
     }
 }
 
 int main() {
-    INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
-    INSTALL(&can0, can_interrupt, CAN_IRQ0);
-
+    INSTALL(&sci0c, sci_interrupt, SCI_IRQ0);
+    INSTALL(&can0c, can_interrupt, CAN_IRQ0);
+    INSTALL(&sio0, sio_interrupt, SIO_IRQ0);
     TINYTIMBER(&musicPlayer, startApp, 0);
     return 0;
 }
 
 void startApp(MusicPlayer *self, int arg) {
 
-    SCI_INIT(&sci0);
-    CAN_INIT(&can0);
-    SCI_WRITE(&sci0, "Application loaded\n");
+    SCI_INIT(&sci0c);
+    CAN_INIT(&can0c);
+    SIO_INIT(&sio0);
+
+    SCI_WRITE(&sci0c, "Application loaded in conductor mode\n");
 }
