@@ -508,14 +508,14 @@ void buttonOld(MusicPlayer *self, int unused) {
 
     if (diff < MSEC(100)) return; // Filter contact bounces
 
-    if (diff <= MSEC(1000)) {
+    if (diff >= MSEC(1000)) {
         // Long press
         // Express time in s
         snprintf(timePrint, 40, "Button long-pressed for %d s\n", SEC_OF(diff));
     } else {
         // Momentary press
         // Express time in ms
-        snprintf(timePrint, 40, "Button long-pressed for %dms\n", MSEC_OF(diff));
+        snprintf(timePrint, 40, "Button short-pressed for %d ms\n", MSEC_OF(diff));
     }
     SCI_WRITE(&sci0c, timePrint);
 }
@@ -538,10 +538,8 @@ void button(MusicPlayer *self, int unused) {
         CANMsg msg;
         msg.nodeId = 1;
         msg.msgId = 'b';
-        char tempoBuff[4];
-        snprintf(tempoBuff, 4, "%d", 120);
-        msg.length = self->buff_index;
-        strcpy((char*)msg.buff, self->buff);
+        snprintf((char*)msg.buff, 4, "%d", 120);
+        msg.length = 3;
         CAN_SEND(&can0c, &msg);
 
         self->tempo = 120;
@@ -571,16 +569,17 @@ void button(MusicPlayer *self, int unused) {
     }
 
     if (!validTempoBurst(self->tempoBurst)) {
-        SCI_WRITE(&sci0c, "Need steadier tempo!");
+        SCI_WRITE(&sci0c, "Need steadier tempo!\n");
         memset(self->tempoBurst, 0, sizeof self->tempoBurst); // Clear tempo burst array
         self->tempo_index = -1; // Reset tempo index
+        return;
     }
 
     // Proper tempoBurst, find and set tempo
     int newTempo = averageTempo(self->tempoBurst); // Find tempo
     
     if (newTempo < 30 || newTempo > 300) {
-        SCI_WRITE(&sci0c, "Tempo must be between 30 and 300 BPM");
+        SCI_WRITE(&sci0c, "Tempo must be between 30 and 300 BPM\n");
         memset(self->tempoBurst, 0, sizeof self->tempoBurst); // Clear tempo burst array
         self->tempo_index = -1; // Reset tempo index
         return;
@@ -590,10 +589,9 @@ void button(MusicPlayer *self, int unused) {
     CANMsg msg;
     msg.nodeId = 1;
     msg.msgId = 'b';
-    char tempoBuff[4];
-    snprintf(tempoBuff, 4, "%d", newTempo);
-    msg.length = self->buff_index;
-    strcpy((char*)msg.buff, self->buff);
+    snprintf((char*)msg.buff, 4, "%d", newTempo);
+    if (newTempo < 100) msg.length = 2;
+    else msg.length = 3;
     CAN_SEND(&can0c, &msg);
 
     self->tempo = newTempo; // Set new tempo
@@ -614,10 +612,10 @@ int averageTempo(Time *tempoBurst) {
 
 int validTempoBurst(Time *tempoBurst) {
     for (int i = 0; i < 3; i++) {
-    // We have at least 1 item in list
     Time diff = tempoBurst[i];
     Time variance = tempoBurst[(i + 1) % 3] - diff; // Difference between last duration
-    if (variance > MSEC(100) && variance < -MSEC(100)) { // 100 ms limit
+
+    if (variance > MSEC(100) || variance < -MSEC(100)) { // 100 ms limit
         return 0;
     }}
     return 1;

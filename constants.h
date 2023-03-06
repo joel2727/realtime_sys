@@ -102,5 +102,4 @@ const int blinkCountFactor[32] = {
 2 
 };
 
-
 #endif
