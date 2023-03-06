@@ -33,7 +33,6 @@ IMPORTANT: Only use tap tempo in conductor mode (Default mode)
 
 #define TONE_DEADLINE 100
 #define MAX_VOLUME 45
-#define BLINK_TIME 100
 
 typedef struct {
     Object super;
@@ -78,6 +77,7 @@ void loopReceiver(MusicPlayer*, int);
 void conductor(MusicPlayer*, int);
 void loopConductor(MusicPlayer*, int);
 void buttonOld(MusicPlayer*, int);
+void buttonOld2(MusicPlayer*, int);
 void button(MusicPlayer*, int);
 void checkLongPress(MusicPlayer*, int);
 void startApp(MusicPlayer*, int);
@@ -125,10 +125,10 @@ void playMelody(MusicPlayer* self, int unused) {
     switch (blinkCountFactor[self->currentMelodyIndex]) {
     case 2: // half note
        SEND(beatLength, MSEC(1), &sio0, sio_write, 0);
-       SEND(beatLength + MSEC(BLINK_TIME), MSEC(1), &sio0, sio_write, 1);
+       SEND(beatLength + beatLength/2, MSEC(1), &sio0, sio_write, 1);
     case 1: // on beat
        SEND(0, MSEC(1), &sio0, sio_write, 0);
-       SEND(MSEC(BLINK_TIME), MSEC(1), &sio0, sio_write, 1);
+       SEND(beatLength/2, MSEC(1), &sio0, sio_write, 1);
     }
 
     // Increment melody index
@@ -520,6 +520,38 @@ void buttonOld(MusicPlayer *self, int unused) {
     SCI_WRITE(&sci0c, timePrint);
 }
 
+void buttonOld2(MusicPlayer *self, int unused) {
+    char timePrint[45];
+    
+    self->stateOfButton = SIO_READ(&sio0);
+    SIO_TRIG(&sio0, !self->stateOfButton);
+
+    //Pressed
+    if(!self->stateOfButton) {
+        T_RESET(&self->longTimer);
+        SEND(SEC(1), MSEC(1), self, checkLongPress, 0);
+        return;
+    }
+    
+    //Released
+    Time diffLong = T_SAMPLE(&self->longTimer);
+    Time diff = T_SAMPLE(&self->timer);
+    T_RESET(&self->timer);
+
+    if (diffLong < MSEC(100)) return; // Filter contact bounces
+
+    if (diffLong >= MSEC(1000)) {
+        // Long press
+        // Express time in s
+        snprintf(timePrint, 40, "Button long-pressed for %d s\n", SEC_OF(diffLong));
+    } else {
+        // Momentary press
+        // Express time in ms
+        snprintf(timePrint, 40, "Time since last press: %d ms\n", SEC_OF(diff)*1000 + MSEC_OF(diff));
+    }
+    SCI_WRITE(&sci0c, timePrint);
+}
+
 void button(MusicPlayer *self, int unused) {
 
     self->stateOfButton = SIO_READ(&sio0);  // Remember button state
@@ -545,7 +577,7 @@ void button(MusicPlayer *self, int unused) {
         self->tempo = 120;
         memset(self->tempoBurst, 0, sizeof self->tempoBurst);
         self->tempo_index = -1;
-        SCI_WRITE(&sci0c, "Tempo reset to 120 BPM");
+        SCI_WRITE(&sci0c, "Tempo reset to 120 BPM\n");
         return;
     }
 
@@ -607,7 +639,7 @@ int averageTempo(Time *tempoBurst) {
     Time averageBeatLength = (tempoBurst[0]
         +tempoBurst[1]
         +tempoBurst[2])/3;
-    return (int) 60000 / MSEC_OF(averageBeatLength);
+    return (int) 60000 / (1000*SEC_OF(averageBeatLength) + MSEC_OF(averageBeatLength));
 } 
 
 int validTempoBurst(Time *tempoBurst) {
